@@ -1,26 +1,89 @@
 import express from "express";
-import fetch from "node-fetch";
+import axios from "axios";
+import mime from "mime";
+import morgan from "morgan";
+import { URL } from "url";
 
 const app = express();
-const PORT = 3000;
+const port = process.env.PORT || 3000;
 
-// Handle proxy requests
-app.get("/proxy", async (req, res) => {
-  try {
-    const url = req.query.url;
-    const response = await fetch(url);
-    const html = await response.text();
-    res.send(html);
-  } catch (error) {
-    res.status(500).send("Error fetching content");
+let lastProtoHost;
+
+app.use(morgan("tiny"));
+
+const regex = /\s+(href|src)=['"](.*?)['"]/g;
+
+const getMimeType = (url) => {
+  if (url.indexOf("?") !== -1) {
+    // remove url query so we can have a clean extension
+    url = url.split("?")[0];
   }
-});
+  if (mime.getType(url) === "application/x-msdownload") return "text/html";
+  return mime.getType(url) || "text/html"; // if there is no extension return as html
+};
 
-// Serve HTML page with iframe
 app.get("/", (req, res) => {
-  res.sendFile(__dirname + "/index.html");
+  const { url } = req.query; // get url parameter
+  if (!url) {
+    res.type("text/html");
+    return res.end("You need to specify <code>url</code> query parameter");
+  }
+
+  axios
+    .get(url, { responseType: "arraybuffer" }) // set response type array buffer to access raw data
+    .then(({ data }) => {
+      const urlMime = getMimeType(url); // get mime type of the requested url
+      if (urlMime === "text/html") {
+        // replace links only in html
+        data = data.toString().replace(regex, (match, p1, p2) => {
+          let newUrl = "";
+          if (p2.indexOf("http") !== -1) {
+            newUrl = p2;
+          } else if (p2.substr(0, 2) === "//") {
+            newUrl = "http:" + p2;
+          } else {
+            const searchURL = new URL(url);
+            let protoHost = searchURL.protocol + "//" + searchURL.host;
+            newUrl = protoHost + p2;
+
+            if (lastProtoHost != protoHost) {
+              lastProtoHost = protoHost;
+              console.log(`Using '${protoHost}' as base for new requests.`);
+            }
+          }
+          return ` ${p1}="${req.protocol}://${req.hostname}:${port}?url=${newUrl}"`;
+        });
+      }
+      res.type(urlMime);
+      res.send(data);
+    })
+    .catch((error) => {
+      console.log(error);
+      res.status(500);
+      res.end("Error");
+    });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+app.get("/*", (req, res) => {
+  if (!lastProtoHost) {
+    res.type("text/html");
+    return res.end(
+      "You need to specify <code>url</code> query parameter first"
+    );
+  }
+
+  const url = lastProtoHost + req.originalUrl;
+  axios
+    .get(url, { responseType: "arraybuffer" }) // set response type array buffer to access raw data
+    .then(({ data }) => {
+      const urlMime = getMimeType(url); // get mime type of the requested url
+      res.type(urlMime);
+      res.send(data);
+    })
+    .catch((error) => {
+      res.status(501);
+      res.end("Not Implemented");
+    });
 });
+
+app.listen(port, () => console.log(`Listening on port ${port}!`));
